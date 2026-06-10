@@ -69,7 +69,7 @@ async function initiateEdit(pElement) {
     const pText = $(pElement).text().trim();
 
     // ==========================================
-    // 保存原始聊天窗口滚动位置
+    // 注入用户提供的代码：保存原始聊天窗口滚动位置
     // ==========================================
     savedScrollPosition = $('#chat').scrollTop();
     isTripleClickEditing = true;
@@ -77,33 +77,27 @@ async function initiateEdit(pElement) {
     // 模拟点击自带的“编辑”按钮进入编辑模式
     $mes.find('.mes_edit').trigger('click');
 
-    // ==========================================
-    // 修复问题1：使用 requestAnimationFrame 极速轮询
-    // 在捕获到输入框的第一瞬间将其透明度设为 0
-    // ==========================================
+    // 修复1: 轮询等待 Textarea 渲染并填充文本 (改为 requestAnimationFrame 极速轮询)
     let $textarea = null;
     await new Promise((resolve) => {
         let attempts = 0;
-        function checkElement() {
+        function check() {
             $textarea = $('#curEditTextarea');
             if ($textarea.length > 0 && $textarea.val().length > 0) {
-                // 瞬间捕获，隐藏编辑框以避免置底卡顿和闪烁
+                // 捕获到输入框的第一瞬间将其透明度设为 0，隐藏默认的置底跳转画面
                 $textarea.css('opacity', '0');
                 resolve();
-            } else if (attempts < 60) { // 大约1秒钟的超时安全退出
+            } else if (attempts < 100) { // 最多等待 ~1.6 秒
                 attempts++;
-                requestAnimationFrame(checkElement);
+                requestAnimationFrame(check);
             } else {
                 resolve();
             }
         }
-        requestAnimationFrame(checkElement);
+        requestAnimationFrame(check);
     });
 
-    if (!$textarea || $textarea.length === 0) {
-        isTripleClickEditing = false;
-        return;
-    }
+    if (!$textarea || $textarea.length === 0) return;
 
     const rawText = $textarea.val();
     let targetIndex = 0;
@@ -127,15 +121,25 @@ async function initiateEdit(pElement) {
         }
     }
 
-    // 执行精准滚动与定位
+    // 执行精准滚动 (此时编辑框仍是透明的，不会闪烁)
     scrollToIndexInTextarea($textarea[0], targetIndex);
 
-    // ==========================================
-    // 修复问题2：打断浏览器为了居中光标而强制执行的滚动
-    // 在一切计算并定位完毕后，立刻恢复#chat容器原本的位置，最后再恢复透明度可见
-    // ==========================================
-    $('#chat').scrollTop(savedScrollPosition);
+    // 修复1补充: 计算和滚动完成后，恢复可见性
     $textarea.css('opacity', '1');
+
+    // 修复2: 强制让该楼层编辑框顶部显示在 #chat 页面的顶部附近
+    const alignChatScroll = () => {
+        const $chat = $('#chat');
+        if ($mes.length > 0) {
+            // 计算楼层元素相对顶部的位置，加 10px 作为视觉缓冲边距
+            const offsetTop = $mes.position().top + $chat.scrollTop();
+            $chat.scrollTop(offsetTop - 10);
+        }
+    };
+    
+    alignChatScroll();
+    // 使用 requestAnimationFrame 再确认一次，抵消 SillyTavern 原生自适应输入框高度逻辑带来的位置偏移
+    requestAnimationFrame(alignChatScroll);
 }
 
 // 插件入口初始化
@@ -145,12 +149,15 @@ jQuery(function() {
     $('#chat').on('click', '.mes_text p', function(e) {
         if (e.detail === 3) {
             e.preventDefault();
-            // 确保没有选中多余的文本干扰视线，同时打断可能触发原生ST逻辑的干扰
+            // 确保没有选中多余的文本干扰视线
             window.getSelection().removeAllRanges(); 
             initiateEdit(this);
         }
     });
 
+    // ==========================================
+    // 注入用户提供的代码：监听消息更新以恢复位置
+    // ==========================================
     // 8. 监听SillyTavern更新消息事件（点击Save、Cancel或者按Esc退出编辑都会触发）
     eventSource.on(event_types.MESSAGE_UPDATED, () => {
         if (isTripleClickEditing) {
