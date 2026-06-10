@@ -60,48 +60,52 @@ jQuery(async function () {
                 const textarea = await waitForElement('#curEditTextarea');
                 const $textarea = $(textarea);
                 
-                // 给予ST内部的自适应高度计算一点点时间
-                setTimeout(() => {
+                // 使用 setInterval 确保 textarea 已被 ST 赋值，消除 fixed timeout 导致的执行时机问题
+                const checkReady = setInterval(() => {
                     const rawText = textarea.value;
-                    let matchIndex = 0;
+                    if (rawText.length > 0) {
+                        clearInterval(checkReady);
+                        let matchIndex = 0;
 
-                    // 5. 在包含Markdown、<!-- draft -->等复杂语法的原文中寻找目标段落
-                    if (searchWords.length > 0) {
-                        // 构建正则：允许单词之间插入0到150个任意字符（兼容复杂的内联标签、注释等）
-                        const regexStr = searchWords.map(escapeRegExp).join('[\\s\\S]{0,150}?');
-                        const regex = new RegExp(regexStr, 'i');
-                        const match = rawText.match(regex);
+                        // 5. 在包含Markdown、<!-- draft -->等复杂语法的原文中寻找目标段落
+                        if (searchWords.length > 0) {
+                            // 构建正则：允许单词之间插入0到150个任意字符（兼容复杂的内联标签、注释等）
+                            const regexStr = searchWords.map(escapeRegExp).join('[\\s\\S]{0,150}?');
+                            const regex = new RegExp(regexStr, 'i');
+                            const match = rawText.match(regex);
+                            
+                            if (match) {
+                                matchIndex = match.index;
+                            }
+                        }
+
+                        // 6. 将光标设置到该段落开头，并利用原生的 focus() 让浏览器瞬间定位，避免先去底部再回弹
+                        textarea.setSelectionRange(matchIndex, matchIndex);
+                        textarea.blur(); // 丢失焦点打断ST的默认定位
+                        textarea.focus(); // 重新聚焦，迫使浏览器立刻滚动到我们设置的光标所在位置
+
+                        // 7. 计算相对位置比例并瞬间滚动视口 (去除 animate 动画以防止视觉滑动残影)
+                        const proportion = matchIndex / rawText.length;
                         
-                        if (match) {
-                            matchIndex = match.index;
+                        // 判断textarea是否有内置滚动条（高度被限制），还是被ST完全撑开了高度
+                        if (textarea.scrollHeight > textarea.clientHeight + 20) {
+                            // 文本域自身出现滚动条的情况
+                            const targetScroll = textarea.scrollHeight * proportion;
+                            $textarea.scrollTop(targetScroll - 50); // 留出一点顶部边距
+                            
+                            // 保证textarea本身在屏幕可视范围内
+                            const offset = $textarea.offset().top - $('#chat').offset().top;
+                            $('#chat').scrollTop($('#chat').scrollTop() + offset - 50);
+                        } else {
+                            // 文本域被完全撑开的情况 (SillyTavern的 field-sizing: content 特性)
+                            const textareaY = $textarea.offset().top - $('#chat').offset().top;
+                            // 计算目标段落在页面中的绝对位置
+                            const targetY = textareaY + ($textarea.height() * proportion);
+                            
+                            $('#chat').scrollTop($('#chat').scrollTop() + targetY - 100);
                         }
                     }
-
-                    // 6. 将光标设置到该段落开头
-                    textarea.setSelectionRange(matchIndex, matchIndex);
-                    textarea.focus();
-
-                    // 7. 计算相对位置比例并滚动视口
-                    const proportion = matchIndex / rawText.length;
-                    
-                    // 判断textarea是否有内置滚动条（高度被限制），还是被ST完全撑开了高度
-                    if (textarea.scrollHeight > textarea.clientHeight + 20) {
-                        // 文本域自身出现滚动条的情况
-                        const targetScroll = textarea.scrollHeight * proportion;
-                        $textarea.scrollTop(targetScroll - 50); // 留出一点顶部边距
-                        
-                        // 保证textarea本身在屏幕可视范围内
-                        const offset = $textarea.offset().top - $('#chat').offset().top;
-                        $('#chat').animate({ scrollTop: $('#chat').scrollTop() + offset - 50 }, 200);
-                    } else {
-                        // 文本域被完全撑开的情况 (SillyTavern的 field-sizing: content 特性)
-                        const textareaY = $textarea.offset().top - $('#chat').offset().top;
-                        // 计算目标段落在页面中的绝对位置
-                        const targetY = textareaY + ($textarea.height() * proportion);
-                        
-                        $('#chat').animate({ scrollTop: $('#chat').scrollTop() + targetY - 100 }, 200);
-                    }
-                }, 50);
+                }, 10);
 
             } catch (err) {
                 console.error("Triple-click edit plugin error:", err);
@@ -111,15 +115,17 @@ jQuery(async function () {
     });
 
     // 8. 监听SillyTavern更新消息事件（点击Save、Cancel或者按Esc退出编辑都会触发）
-    // 恢复进入编辑模式前的位置，防止跳跃到消息顶部
     eventSource.on(event_types.MESSAGE_UPDATED, () => {
         if (isTripleClickEditing) {
             isTripleClickEditing = false;
             
-            // 延迟极短的时间以确保ST的Markdown渲染和DOM更新已经完毕
-            setTimeout(() => {
+            // 修复：同步立即恢复滚动位置，拦截浏览器将视图重置到消息顶部的默认行为
+            $('#chat').scrollTop(savedScrollPosition);
+            
+            // 修复：使用 requestAnimationFrame 在浏览器下一次重绘前再次确认位置，确保退出极度平滑无闪烁
+            requestAnimationFrame(() => {
                 $('#chat').scrollTop(savedScrollPosition);
-            }, 50);
+            });
         }
     });
 });
