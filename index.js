@@ -37,17 +37,8 @@ function scrollToIndexInTextarea(textarea, index) {
     // 截取从开头到目标索引的文本
     const textUpToIndex = textarea.value.substring(0, index);
 
-    // 【修复问题2】：转义 HTML 特殊字符
-    // 防止 <!-- draft --> 或 <tag> 在 innerHTML 中被当做真实注释/标签解析而“失去高度”
-    const escapeHtml = (text) => text
-        .replace(/&/g, '&amp;')
-        .replace(/</g, '&lt;')
-        .replace(/>/g, '&gt;');
-        
-    const safeText = escapeHtml(textUpToIndex).replace(/\n/g, '<br>');
-
-    // 插入转义后的安全文本与一个追踪位置的锚点 span
-    mirror.innerHTML = safeText + '<span id="caret-marker">|</span>';
+    // 转换换行符并插入一个追踪位置的锚点 span
+    mirror.innerHTML = textUpToIndex.replace(/\n/g, '<br>') + '<span id="caret-marker">|</span>';
 
     document.body.appendChild(mirror);
 
@@ -60,9 +51,13 @@ function scrollToIndexInTextarea(textarea, index) {
     // 将编辑框的滚动条精确设定到计算出的高度
     textarea.scrollTop = targetTop;
 
-    // 将光标设置在目标段落的开头，并聚焦
+    // 将光标设置在目标段落的开头，并聚焦。
+    // 【修复问题2】：使用 preventScroll 阻止浏览器默认的整体视图滚动行为
     textarea.setSelectionRange(index, index);
-    textarea.focus();
+    textarea.focus({ preventScroll: true });
+    
+    // 双重保险：再次锁定外部聊天框高度，防止发生偏移
+    $('#chat').scrollTop(savedScrollPosition);
 }
 
 /**
@@ -78,7 +73,7 @@ async function initiateEdit(pElement) {
     const pText = $(pElement).text().trim();
 
     // ==========================================
-    // 注入用户提供的代码：保存原始聊天窗口滚动位置
+    // 保存原始聊天窗口滚动位置
     // ==========================================
     savedScrollPosition = $('#chat').scrollTop();
     isTripleClickEditing = true;
@@ -86,20 +81,27 @@ async function initiateEdit(pElement) {
     // 模拟点击自带的“编辑”按钮进入编辑模式
     $mes.find('.mes_edit').trigger('click');
 
-    // 【修复问题1】：使用 requestAnimationFrame 极速轮询，并在第一瞬间将透明度设为 0
+    // 【修复问题1与2】：使用 requestAnimationFrame 进行极速轮询，并立即设为透明
     let $textarea = null;
     await new Promise((resolve) => {
-        const startTime = Date.now();
+        let attempts = 0;
         function checkTextarea() {
             $textarea = $('#curEditTextarea');
-            // 确保 textarea 存在且已经填充了内容
             if ($textarea.length > 0 && $textarea.val().length > 0) {
-                $textarea.css('opacity', '0'); // 第一瞬间隐形，消除默认置底的闪烁
+                // 第一瞬间捕获：设为透明，隐藏底部的闪烁跳转
+                $textarea.css('opacity', '0'); 
+                // 强行压制 SillyTavern 原生 focus() 带来的页面往下掉现象
+                $('#chat').scrollTop(savedScrollPosition); 
                 resolve();
-            } else if (Date.now() - startTime > 1000) {
-                resolve(); // 1秒超时保护
             } else {
-                requestAnimationFrame(checkTextarea);
+                attempts++;
+                if (attempts < 60) { // 最多等约1秒（60帧）
+                    // 在等待生成的过程中持续锁定滚动条
+                    $('#chat').scrollTop(savedScrollPosition);
+                    requestAnimationFrame(checkTextarea);
+                } else {
+                    resolve();
+                }
             }
         }
         requestAnimationFrame(checkTextarea);
@@ -122,21 +124,6 @@ async function initiateEdit(pElement) {
 
         if (match) {
             targetIndex = match.index;
-            
-            // 【针对问题2的额外优化】：如果匹配到的文本前面紧挨着 <!-- ... --> 隐藏标签块
-            // 我们将光标与定位点进一步提前到注释的开头，确保你能完整看到它们，而不需要往上滚
-            const textBefore = rawText.substring(0, targetIndex);
-            const lastCommentEnd = textBefore.lastIndexOf('-->');
-            if (lastCommentEnd !== -1) {
-                // 检查 --> 到正文之间是否只有空白字符或换行
-                const spaceBetween = textBefore.substring(lastCommentEnd + 3);
-                if (/^\s*$/.test(spaceBetween)) {
-                    const lastCommentStart = textBefore.lastIndexOf('<!--');
-                    if (lastCommentStart !== -1) {
-                        targetIndex = lastCommentStart; // 追溯定位到注释最顶端
-                    }
-                }
-            }
         } else {
             // 如果极度复杂的结构导致正则失效，退回到基础的 index 匹配
             targetIndex = rawText.indexOf(words.join(' '));
@@ -144,11 +131,12 @@ async function initiateEdit(pElement) {
         }
     }
 
-    // 执行精准滚动
+    // 执行精准滚动与定位
     scrollToIndexInTextarea($textarea[0], targetIndex);
-
-    // 【修复问题1】：高度计算与滚动完毕后，恢复文本框显示，实现无缝切换
+    
+    // 【修复问题1】：定位全部完成后，将透明度恢复，实现无缝显示，无闪烁
     $textarea.css('opacity', '1');
+    $('#chat').scrollTop(savedScrollPosition);
 }
 
 // 插件入口初始化
@@ -165,9 +153,8 @@ jQuery(function() {
     });
 
     // ==========================================
-    // 注入用户提供的代码：监听消息更新以恢复位置
+    // 监听更新消息事件（点击Save、Cancel或者按Esc退出编辑都会触发）
     // ==========================================
-    // 8. 监听SillyTavern更新消息事件（点击Save、Cancel或者按Esc退出编辑都会触发）
     eventSource.on(event_types.MESSAGE_UPDATED, () => {
         if (isTripleClickEditing) {
             isTripleClickEditing = false;
