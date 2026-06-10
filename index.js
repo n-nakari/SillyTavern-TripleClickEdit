@@ -59,7 +59,7 @@ function scrollToIndexInTextarea(textarea, index) {
 /**
  * 触发进入编辑模式并自动定位
  */
-function initiateEdit(pElement) {
+async function initiateEdit(pElement) {
     const $mes = $(pElement).closest('.mes');
     const mesId = $mes.attr('mesid');
 
@@ -77,55 +77,70 @@ function initiateEdit(pElement) {
     // 模拟点击自带的“编辑”按钮进入编辑模式
     $mes.find('.mes_edit').trigger('click');
 
-    // 采用 requestAnimationFrame 实现极速轮询，捕捉生成的编辑框，消除等待延迟
-    let attempts = 0;
-    const findAndScroll = () => {
-        const $textarea = $('#curEditTextarea');
-        
-        if ($textarea.length > 0 && $textarea.val().length > 0) {
-            // 找到编辑框后，立刻将其透明度设为 0，防止在最底部时发生视觉闪烁跳转
-            $textarea.css('opacity', '0');
-            
-            const rawText = $textarea.val();
-            let targetIndex = 0;
+    // 使用 requestAnimationFrame 极速轮询等待 Textarea 渲染
+    return new Promise((resolve) => {
+        let attempts = 0;
+        const maxAttempts = 60; // 约 1 秒 (60 帧)，防止死循环
 
-            // 提取前 15 个非空白字符（使用 Array.from 完美处理 Emoji 和 中文字符）
-            const chars = Array.from(pText.replace(/\s+/g, '')).slice(0, 15);
+        function checkTextarea() {
+            const $textarea = $('#curEditTextarea');
             
-            if (chars.length > 0) {
-                // 转义正则特殊字符
-                const escapedChars = chars.map(c => c.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'));
-                
-                // 核心修复：严苛拼接正则
-                // 允许字符之间存在“最多 20 个的空白符、Markdown 符号或 HTML 标签”
-                // 这样既能穿透段落内部的 **加粗** 格式，又绝对跨不过像 <!-- consider: ... --> 这种带有普通文字的注释块
-                const regexStr = escapedChars.join('(?:\\s|[*_~`="\']|<[^>]+>){0,20}?');
-                const matchRegex = new RegExp(regexStr, 'i');
-                const match = rawText.match(matchRegex);
+            if ($textarea.length > 0) {
+                // 第一瞬间将透明度设为 0，阻断一切跳转与置底闪烁！
+                if ($textarea.css('opacity') !== '0') {
+                    $textarea.css('opacity', '0');
+                }
 
-                if (match) {
-                    targetIndex = match.index;
-                } else {
-                    // Fallback: 如果依然没有匹配到，退回到非常基础的字符串查找
-                    targetIndex = rawText.indexOf(pText.substring(0, 10));
-                    if (targetIndex === -1) targetIndex = 0; 
+                if ($textarea.val().length > 0) {
+                    const rawText = $textarea.val();
+                    let targetIndex = 0;
+
+                    // ====== 核心改进：生成忽略多行注释的安全搜索副本 ======
+                    // 将所有的 <!-- ... --> 以及可能写错的 <--! ... --> 替换为等长度的空格
+                    // 这样就能确保匹配出的 index 完全正确，且绝不会匹配进隐藏段落里
+                    const searchableText = rawText.replace(/<(?:!--|--!)[\s\S]*?-->/g, match => ' '.repeat(match.length));
+
+                    // 取段落里前 15 个非空字符作为搜索锚点（无视中英文分词规律）
+                    const chars = pText.replace(/\s+/g, '').substring(0, 15).split('');
+                    
+                    if (chars.length > 0) {
+                        // 构建宽容正则：每个字中间最多允许20个无关字符（包容 Markdown 星号、排版等干扰）
+                        const regexStr = chars.map(c => c.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('[\\s\\S]{0,20}?');
+                        const matchRegex = new RegExp(regexStr, 'i');
+
+                        // 在“屏蔽了注释”的安全文本中搜索，直击正文
+                        const match = searchableText.match(matchRegex);
+
+                        if (match) {
+                            targetIndex = match.index;
+                        } else {
+                            // 终极备用方案：寻找前10个字的纯文本死配
+                            targetIndex = searchableText.indexOf(pText.substring(0, 10));
+                            if (targetIndex === -1) targetIndex = 0; 
+                        }
+                    }
+
+                    // 执行精准滚动
+                    scrollToIndexInTextarea($textarea[0], targetIndex);
+                    
+                    // 计算和滚动完成，恢复编辑框的可见度
+                    $textarea.css('opacity', '1');
+                    return resolve();
                 }
             }
 
-            // 执行精准滚动
-            scrollToIndexInTextarea($textarea[0], targetIndex);
-            
-            // 滚动完成后，恢复文本框可见度（瞬间完成，无视觉卡顿）
-            $textarea.css('opacity', '1');
-            
-        } else if (attempts < 60) { 
-            // 最多尝试约 1 秒 (60帧)
             attempts++;
-            requestAnimationFrame(findAndScroll);
+            if (attempts < maxAttempts) {
+                requestAnimationFrame(checkTextarea);
+            } else {
+                // 保底超时处理，恢复可见性
+                if ($textarea.length > 0) $textarea.css('opacity', '1');
+                resolve();
+            }
         }
-    };
-    
-    requestAnimationFrame(findAndScroll);
+
+        requestAnimationFrame(checkTextarea);
+    });
 }
 
 // 插件入口初始化
@@ -142,9 +157,9 @@ jQuery(function() {
     });
 
     // ==========================================
-    // 监听消息更新以恢复位置
+    // 监听SillyTavern更新消息事件以恢复位置
     // ==========================================
-    // 8. 监听SillyTavern更新消息事件（点击Save、Cancel或者按Esc退出编辑都会触发）
+    // （点击Save、Cancel或者按Esc退出编辑都会触发）
     eventSource.on(event_types.MESSAGE_UPDATED, () => {
         if (isTripleClickEditing) {
             isTripleClickEditing = false;
