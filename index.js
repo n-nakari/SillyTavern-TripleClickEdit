@@ -1,139 +1,125 @@
-import { eventSource, event_types } from '../../../../script.js';
+import { eventSource, event_types } from "../../../../script.js";
 
-let chatScrollBeforeEdit = null;
-let editingMesId = null;
+jQuery(async function () {
+    let savedScrollPosition = 0;
+    let isTripleClickEditing = false;
 
-export async function init() {
-    // 监听消息正文段落（<p> 标签）的点击事件
-    $(document).on('click', '.mes_text p', function (e) {
-        // e.detail 记录了连续点击的次数，3 表示三击
-        if (e.detail === 3) {
-            handleTripleClick(e, this);
-        }
-    });
+    // 辅助函数：等待DOM元素出现
+    function waitForElement(selector, timeout = 3000) {
+        return new Promise((resolve, reject) => {
+            if (document.querySelector(selector)) {
+                return resolve(document.querySelector(selector));
+            }
+            const observer = new MutationObserver((mutations) => {
+                if (document.querySelector(selector)) {
+                    observer.disconnect();
+                    resolve(document.querySelector(selector));
+                }
+            });
+            observer.observe(document.body, { childList: true, subtree: true });
+            setTimeout(() => {
+                observer.disconnect();
+                reject(new Error(`Timeout waiting for ${selector}`));
+            }, timeout);
+        });
+    }
 
-    // 监听消息更新事件（当退出编辑模式，无论是点击 Save 还是 Cancel 都会触发）
-    eventSource.on(event_types.MESSAGE_UPDATED, (mesId) => {
-        // 如果当前更新的消息就是我们刚才三击触发编辑的消息
-        if (editingMesId !== null && mesId === editingMesId) {
-            if (chatScrollBeforeEdit !== null) {
-                // 延迟 100ms 恢复滚动条，确保 ST 的 Markdown 渲染和 DOM 坍缩已经完全结束
+    // 辅助函数：转义正则特殊字符
+    function escapeRegExp(string) {
+        return string.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    }
+
+    // 监听聊天框内段落的点击事件
+    $('#chat').on('click', '.mes_text p', async function (e) {
+        // 判断是否为连续三次点击
+        if (e.originalEvent.detail === 3) {
+            e.preventDefault();
+            
+            const $p = $(this);
+            const $mes = $p.closest('.mes');
+            const $editBtn = $mes.find('.mes_edit');
+            
+            if ($editBtn.length === 0) return; // 如果没有编辑按钮，说明不可编辑
+
+            // 1. 保存当前滚动位置
+            savedScrollPosition = $('#chat').scrollTop();
+            isTripleClickEditing = true;
+
+            // 2. 提取所点击段落的核心词汇，用于在Markdown源码中进行模糊定位
+            // 去除所有标点符号，只保留字母、数字和空白字符（支持中文）
+            const textToFind = $p.text().trim();
+            const cleanText = textToFind.replace(/[^\p{L}\p{N}\s]/gu, '');
+            // 取出前8个具有代表性的词汇/字
+            const searchWords = cleanText.split(/\s+/).filter(w => w.length > 0).slice(0, 8);
+
+            // 3. 触发SillyTavern内置的编辑功能
+            $editBtn.trigger('click');
+
+            try {
+                // 4. 等待编辑用的 textarea 渲染完成
+                const textarea = await waitForElement('#curEditTextarea');
+                const $textarea = $(textarea);
+                
+                // 给予ST内部的自适应高度计算一点点时间
                 setTimeout(() => {
-                    $('#chat').scrollTop(chatScrollBeforeEdit);
-                    chatScrollBeforeEdit = null;
-                    editingMesId = null;
-                }, 100);
+                    const rawText = textarea.value;
+                    let matchIndex = 0;
+
+                    // 5. 在包含Markdown、<!-- draft -->等复杂语法的原文中寻找目标段落
+                    if (searchWords.length > 0) {
+                        // 构建正则：允许单词之间插入0到150个任意字符（兼容复杂的内联标签、注释等）
+                        const regexStr = searchWords.map(escapeRegExp).join('[\\s\\S]{0,150}?');
+                        const regex = new RegExp(regexStr, 'i');
+                        const match = rawText.match(regex);
+                        
+                        if (match) {
+                            matchIndex = match.index;
+                        }
+                    }
+
+                    // 6. 将光标设置到该段落开头
+                    textarea.setSelectionRange(matchIndex, matchIndex);
+                    textarea.focus();
+
+                    // 7. 计算相对位置比例并滚动视口
+                    const proportion = matchIndex / rawText.length;
+                    
+                    // 判断textarea是否有内置滚动条（高度被限制），还是被ST完全撑开了高度
+                    if (textarea.scrollHeight > textarea.clientHeight + 20) {
+                        // 文本域自身出现滚动条的情况
+                        const targetScroll = textarea.scrollHeight * proportion;
+                        $textarea.scrollTop(targetScroll - 50); // 留出一点顶部边距
+                        
+                        // 保证textarea本身在屏幕可视范围内
+                        const offset = $textarea.offset().top - $('#chat').offset().top;
+                        $('#chat').animate({ scrollTop: $('#chat').scrollTop() + offset - 50 }, 200);
+                    } else {
+                        // 文本域被完全撑开的情况 (SillyTavern的 field-sizing: content 特性)
+                        const textareaY = $textarea.offset().top - $('#chat').offset().top;
+                        // 计算目标段落在页面中的绝对位置
+                        const targetY = textareaY + ($textarea.height() * proportion);
+                        
+                        $('#chat').animate({ scrollTop: $('#chat').scrollTop() + targetY - 100 }, 200);
+                    }
+                }, 50);
+
+            } catch (err) {
+                console.error("Triple-click edit plugin error:", err);
+                isTripleClickEditing = false;
             }
         }
     });
-}
 
-/**
- * 处理三击事件的核心逻辑
- */
-async function handleTripleClick(e, paragraphElement) {
-    const $p = $(paragraphElement);
-    const $mes = $p.closest('.mes');
-    const mesId = parseInt($mes.attr('mesid'), 10);
-
-    if (isNaN(mesId)) return;
-
-    // 1. 记录进入编辑模式前，整个聊天界面的滚动条位置
-    chatScrollBeforeEdit = $('#chat').scrollTop();
-    editingMesId = mesId;
-
-    // 获取被点击段落的纯文本内容，用于后续在 Markdown 源码中定位
-    const pText = $p.text();
-
-    // 2. 寻找当前消息的“编辑”按钮并触发点击
-    const $editBtn = $mes.find('.mes_edit');
-    if ($editBtn.length === 0) return;
-
-    $editBtn.trigger('click');
-
-    // 3. 轮询等待编辑框 (Textarea) 动态生成并挂载到 DOM
-    let retries = 20;
-    let $textarea = [];
-    while (retries > 0) {
-        await new Promise(r => setTimeout(r, 50));
-        $textarea = $mes.find('textarea.edit_textarea');
-        if ($textarea.length > 0) break;
-        retries--;
-    }
-
-    if ($textarea.length === 0) return;
-
-    // 4. 在 Markdown 源码中查找该段落的字符索引位置
-    const markdownText = $textarea.val();
-    const index = findTextIndexInMarkdown(pText, markdownText);
-
-    if (index !== -1) {
-        // 5. 计算高度并让聊天窗口滚动到对应段落
-        scrollChatToTextareaIndex($textarea[0], index);
-    }
-}
-
-/**
- * 在 Markdown 源码中模糊查找 HTML 文本的所在位置
- */
-function findTextIndexInMarkdown(htmlText, markdownText) {
-    // 移除非文字和非数字的字符（支持多语言，\p{L} 匹配所有字母/汉字/假名等，\p{N} 匹配数字）
-    let searchText = htmlText.replace(/[^\p{L}\p{N}]/gu, '');
-    
-    // 提取段落开头最多 20 个有效字符作为特征字符串
-    if (searchText.length > 20) searchText = searchText.substring(0, 20);
-    // 如果段落太短，匹配极易出错，直接放弃定位
-    if (searchText.length < 2) return -1;
-
-    // 构建一个宽松的正则表达式，允许两个字之间存在任意数量的 Markdown 标记符号（如 * _ # > 等）
-    let regexStr = searchText.split('').join('[^\\p{L}\\p{N}]*');
-    
-    try {
-        let regex = new RegExp(regexStr, 'iu');
-        let match = markdownText.match(regex);
-        return match ? match.index : -1;
-    } catch (err) {
-        console.error("Triple-click edit regex parse error:", err);
-        return -1;
-    }
-}
-
-/**
- * 根据找到的字符串索引，将主聊天视口（#chat）滚动到编辑框中该行出现的位置
- */
-function scrollChatToTextareaIndex(textarea, index) {
-    // 将光标焦点设置到目标位置
-    textarea.focus();
-    textarea.setSelectionRange(index, index);
-
-    // 计算目标字符在第几行（通过统计前面的换行符数量）
-    const textBefore = textarea.value.substring(0, index);
-    const linesBefore = textBefore.split('\n').length;
-
-    // 获取 textarea 实际渲染的行高
-    const computedStyle = window.getComputedStyle(textarea);
-    let lineHeight = parseInt(computedStyle.lineHeight, 10);
-    if (isNaN(lineHeight)) {
-        // 如果 line-height 为 'normal'，使用字体大小的 1.2 倍作为近似值
-        lineHeight = parseInt(computedStyle.fontSize, 10) * 1.2 || 20;
-    }
-
-    // 计算该行文字相对于 textarea 顶部的像素偏移量
-    const lineOffsetY = Math.max(0, (linesBefore - 1) * lineHeight);
-
-    const $chat = $('#chat');
-    const $textarea = $(textarea);
-
-    // 计算 textarea 的顶部相对于当前 #chat 滚动视口顶部的绝对 Y 坐标
-    const chatOffsetTop = $chat.offset().top;
-    const textareaOffsetTop = $textarea.offset().top;
-    const currentChatScroll = $chat.scrollTop();
-
-    const absoluteTextareaTop = currentChatScroll + (textareaOffsetTop - chatOffsetTop);
-
-    // 目标滚动位置：textarea 的绝对顶端 + 行偏移 - 顶部留白（留出 80px 使得目标段落不要紧贴屏幕边缘）
-    const targetScroll = absoluteTextareaTop + lineOffsetY - 80;
-
-    // 将外部聊天容器平滑或瞬间切至目标位置
-    $chat.scrollTop(targetScroll);
-}
+    // 8. 监听SillyTavern更新消息事件（点击Save、Cancel或者按Esc退出编辑都会触发）
+    // 恢复进入编辑模式前的位置，防止跳跃到消息顶部
+    eventSource.on(event_types.MESSAGE_UPDATED, () => {
+        if (isTripleClickEditing) {
+            isTripleClickEditing = false;
+            
+            // 延迟极短的时间以确保ST的Markdown渲染和DOM更新已经完毕
+            setTimeout(() => {
+                $('#chat').scrollTop(savedScrollPosition);
+            }, 50);
+        }
+    });
+});
