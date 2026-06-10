@@ -51,15 +51,15 @@ function scrollToIndexInTextarea(textarea, index) {
     // 将编辑框的滚动条精确设定到计算出的高度
     textarea.scrollTop = targetTop;
 
-    // 【修复问题2】：设置光标并聚焦，同时明确告知浏览器"不要为了对齐焦点而强制滚动页面"
-    textarea.setSelectionRange(index, index);
+    // 将光标设置在目标段落的开头，并聚焦 (使用 preventScroll 避免浏览器自作主张的滚动跳动)
     textarea.focus({ preventScroll: true });
+    textarea.setSelectionRange(index, index);
 }
 
 /**
  * 触发进入编辑模式并自动定位
  */
-function initiateEdit(pElement) {
+async function initiateEdit(pElement) {
     const $mes = $(pElement).closest('.mes');
     const mesId = $mes.attr('mesid');
 
@@ -69,72 +69,74 @@ function initiateEdit(pElement) {
     const pText = $(pElement).text().trim();
 
     // ==========================================
-    // 保存原始聊天窗口滚动位置，标记状态
+    // 保存原始聊天窗口滚动位置
     // ==========================================
     savedScrollPosition = $('#chat').scrollTop();
     isTripleClickEditing = true;
 
-    // 【修复问题2】：在触发编辑前，彻底清除浏览器的三击默认选区，防止干扰ST原生的滚动计算
-    window.getSelection().removeAllRanges();
-
     // 模拟点击自带的“编辑”按钮进入编辑模式
-    $mes.find('.mes_edit').trigger('click');
+    // 如果由于 click_to_edit 等原因已经存在编辑框，就不重复触发
+    if ($mes.find('.edit_textarea').length === 0) {
+        $mes.find('.mes_edit').trigger('click');
+    }
 
-    // 【修复问题1】：使用 requestAnimationFrame 进行极速轮询，消除视觉跳转卡顿
+    // 使用 requestAnimationFrame 极速轮询等待 Textarea 渲染
     let $textarea = null;
     let attempts = 0;
-
-    function checkAndLocate() {
-        $textarea = $('#curEditTextarea');
-        
-        if ($textarea.length > 0 && $textarea.val().length > 0) {
-            // 第一时间将透明度设为 0，掩盖ST原生将其拉到底部的过程
-            $textarea.css('opacity', '0');
-
-            // 锁定外部聊天窗口的滚动位置，防止 ST 原生逻辑产生的跳动
-            $('#chat').scrollTop(savedScrollPosition);
-
-            const rawText = $textarea.val();
-            let targetIndex = 0;
-
-            // 构建一个允许穿透 HTML 注释 (如 <!-- draft -->) 及 Markdown 符号的正则表达式
-            // 取该段落的前 10 个单词作为锚点
-            const words = pText.split(/\s+/).slice(0, 10).map(w => w.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'));
-            
-            if (words.length > 0) {
-                // [\s\S]*? 允许匹配两个单词之间的任意字符
-                const regexStr = words.join('[\\s\\S]*?');
-                const matchRegex = new RegExp(regexStr, 'i');
-                const match = rawText.match(matchRegex);
-
-                if (match) {
-                    targetIndex = match.index;
-                } else {
-                    // 如果极度复杂的结构导致正则失效，退回到基础的 index 匹配
-                    targetIndex = rawText.indexOf(words.join(' '));
-                    if (targetIndex === -1) targetIndex = 0; 
+    
+    await new Promise(resolve => {
+        const check = () => {
+            $textarea = $('#curEditTextarea');
+            if ($textarea.length > 0) {
+                // 【核心修复1】发现编辑框的第一时间，将其设为完全透明，避免肉眼看到 ST 官方代码强制光标置底的画面
+                $textarea.css('opacity', '0');
+                // 等待 ST 将内容填充完毕
+                if ($textarea.val().length > 0) {
+                    resolve(true);
+                    return;
                 }
             }
-
-            // 执行精准滚动与聚焦
-            scrollToIndexInTextarea($textarea[0], targetIndex);
-
-            // 等待浏览器渲染位置后，恢复透明度，并在下一帧再次巩固外层滚动条位置
-            requestAnimationFrame(() => {
-                $textarea.css('opacity', '1');
-                $('#chat').scrollTop(savedScrollPosition);
-            });
-
-        } else {
-            attempts++;
-            if (attempts < 60) { // 最大容错：尝试约1秒
-                requestAnimationFrame(checkAndLocate);
+            // 超时保护：约 1.5 秒 (90帧)
+            if (attempts > 90) {
+                resolve(false);
+                return;
             }
+            attempts++;
+            requestAnimationFrame(check);
+        };
+        requestAnimationFrame(check);
+    });
+
+    if (!$textarea || $textarea.length === 0) return;
+
+    const rawText = $textarea.val();
+    let targetIndex = 0;
+
+    // 构建一个允许穿透 HTML 注释 (如 <!-- draft -->) 及 Markdown 符号的正则表达式
+    // 取该段落的前 10 个单词作为锚点
+    const words = pText.split(/\s+/).slice(0, 10).map(w => w.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'));
+    
+    if (words.length > 0) {
+        // [\s\S]*? 允许匹配两个单词之间的任意字符（如空格、星号、HTML标签、注释等）
+        const regexStr = words.join('[\\s\\S]*?');
+        const matchRegex = new RegExp(regexStr, 'i');
+        const match = rawText.match(matchRegex);
+
+        if (match) {
+            targetIndex = match.index;
+        } else {
+            // 如果极度复杂的结构导致正则失效，退回到基础的 index 匹配
+            targetIndex = rawText.indexOf(words.join(' '));
+            if (targetIndex === -1) targetIndex = 0; 
         }
     }
 
-    // 启动极速轮询
-    requestAnimationFrame(checkAndLocate);
+    // 执行精准滚动
+    scrollToIndexInTextarea($textarea[0], targetIndex);
+    
+    // 【核心修复2】解除透明伪装，并立刻强势恢复 #chat 的滚动位置，抵消任何因焦点跳动带来的页面偏移
+    $textarea.css('opacity', '1');
+    $('#chat').scrollTop(savedScrollPosition);
 }
 
 // 插件入口初始化
@@ -144,13 +146,18 @@ jQuery(function() {
     $('#chat').on('click', '.mes_text p', function(e) {
         if (e.detail === 3) {
             e.preventDefault();
+            // 阻止事件冒泡，切断 ST 原生的单次点击编辑逻辑，防止二次触发冲突
+            e.stopPropagation(); 
+            // 确保没有选中多余的文本干扰视线
+            window.getSelection().removeAllRanges(); 
             initiateEdit(this);
         }
     });
 
     // ==========================================
-    // 监听SillyTavern更新消息事件（退出编辑时恢复位置）
+    // 监听更新消息事件以恢复位置
     // ==========================================
+    // 8. 监听SillyTavern更新消息事件（点击Save、Cancel或者按Esc退出编辑都会触发）
     eventSource.on(event_types.MESSAGE_UPDATED, () => {
         if (isTripleClickEditing) {
             isTripleClickEditing = false;
