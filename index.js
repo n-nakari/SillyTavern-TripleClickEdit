@@ -59,7 +59,7 @@ function scrollToIndexInTextarea(textarea, index) {
 /**
  * 触发进入编辑模式并自动定位
  */
-async function initiateEdit(pElement) {
+function initiateEdit(pElement) {
     const $mes = $(pElement).closest('.mes');
     const mesId = $mes.attr('mesid');
 
@@ -69,7 +69,7 @@ async function initiateEdit(pElement) {
     const pText = $(pElement).text().trim();
 
     // ==========================================
-    // 注入用户提供的代码：保存原始聊天窗口滚动位置
+    // 保存原始聊天窗口滚动位置
     // ==========================================
     savedScrollPosition = $('#chat').scrollTop();
     isTripleClickEditing = true;
@@ -77,42 +77,55 @@ async function initiateEdit(pElement) {
     // 模拟点击自带的“编辑”按钮进入编辑模式
     $mes.find('.mes_edit').trigger('click');
 
-    // 轮询等待 Textarea 渲染并填充文本 (最多等待 1 秒)
-    let $textarea = null;
-    for (let i = 0; i < 20; i++) { 
-        await new Promise(r => setTimeout(r, 50));
-        $textarea = $('#curEditTextarea');
+    // 采用 requestAnimationFrame 实现极速轮询，捕捉生成的编辑框，消除等待延迟
+    let attempts = 0;
+    const findAndScroll = () => {
+        const $textarea = $('#curEditTextarea');
+        
         if ($textarea.length > 0 && $textarea.val().length > 0) {
-            break;
+            // 找到编辑框后，立刻将其透明度设为 0，防止在最底部时发生视觉闪烁跳转
+            $textarea.css('opacity', '0');
+            
+            const rawText = $textarea.val();
+            let targetIndex = 0;
+
+            // 提取前 15 个非空白字符（使用 Array.from 完美处理 Emoji 和 中文字符）
+            const chars = Array.from(pText.replace(/\s+/g, '')).slice(0, 15);
+            
+            if (chars.length > 0) {
+                // 转义正则特殊字符
+                const escapedChars = chars.map(c => c.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'));
+                
+                // 核心修复：严苛拼接正则
+                // 允许字符之间存在“最多 20 个的空白符、Markdown 符号或 HTML 标签”
+                // 这样既能穿透段落内部的 **加粗** 格式，又绝对跨不过像 <!-- consider: ... --> 这种带有普通文字的注释块
+                const regexStr = escapedChars.join('(?:\\s|[*_~`="\']|<[^>]+>){0,20}?');
+                const matchRegex = new RegExp(regexStr, 'i');
+                const match = rawText.match(matchRegex);
+
+                if (match) {
+                    targetIndex = match.index;
+                } else {
+                    // Fallback: 如果依然没有匹配到，退回到非常基础的字符串查找
+                    targetIndex = rawText.indexOf(pText.substring(0, 10));
+                    if (targetIndex === -1) targetIndex = 0; 
+                }
+            }
+
+            // 执行精准滚动
+            scrollToIndexInTextarea($textarea[0], targetIndex);
+            
+            // 滚动完成后，恢复文本框可见度（瞬间完成，无视觉卡顿）
+            $textarea.css('opacity', '1');
+            
+        } else if (attempts < 60) { 
+            // 最多尝试约 1 秒 (60帧)
+            attempts++;
+            requestAnimationFrame(findAndScroll);
         }
-    }
-
-    if (!$textarea || $textarea.length === 0) return;
-
-    const rawText = $textarea.val();
-    let targetIndex = 0;
-
-    // 构建一个允许穿透 HTML 注释 (如 <!-- draft -->) 及 Markdown 符号的正则表达式
-    // 取该段落的前 10 个单词作为锚点
-    const words = pText.split(/\s+/).slice(0, 10).map(w => w.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'));
+    };
     
-    if (words.length > 0) {
-        // [\s\S]*? 允许匹配两个单词之间的任意字符（如空格、星号、HTML标签、注释等）
-        const regexStr = words.join('[\\s\\S]*?');
-        const matchRegex = new RegExp(regexStr, 'i');
-        const match = rawText.match(matchRegex);
-
-        if (match) {
-            targetIndex = match.index;
-        } else {
-            // 如果极度复杂的结构导致正则失效，退回到基础的 index 匹配
-            targetIndex = rawText.indexOf(words.join(' '));
-            if (targetIndex === -1) targetIndex = 0; 
-        }
-    }
-
-    // 执行精准滚动
-    scrollToIndexInTextarea($textarea[0], targetIndex);
+    requestAnimationFrame(findAndScroll);
 }
 
 // 插件入口初始化
@@ -129,7 +142,7 @@ jQuery(function() {
     });
 
     // ==========================================
-    // 注入用户提供的代码：监听消息更新以恢复位置
+    // 监听消息更新以恢复位置
     // ==========================================
     // 8. 监听SillyTavern更新消息事件（点击Save、Cancel或者按Esc退出编辑都会触发）
     eventSource.on(event_types.MESSAGE_UPDATED, () => {
@@ -145,5 +158,4 @@ jQuery(function() {
             });
         }
     });
-
 });
