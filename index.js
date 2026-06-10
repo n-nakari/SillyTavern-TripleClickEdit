@@ -37,8 +37,16 @@ function scrollToIndexInTextarea(textarea, index) {
     // 截取从开头到目标索引的文本
     const textUpToIndex = textarea.value.substring(0, index);
 
+    // 修复定位偏移：将 HTML 特殊字符转义，防止 <!-- draft --> 等在 innerHTML 中被当作真实注释隐藏，从而丢失这部分文本的高度
+    const escapedText = textUpToIndex
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#39;');
+
     // 转换换行符并插入一个追踪位置的锚点 span
-    mirror.innerHTML = textUpToIndex.replace(/\n/g, '<br>') + '<span id="caret-marker">|</span>';
+    mirror.innerHTML = escapedText.replace(/\n/g, '<br>') + '<span id="caret-marker">|</span>';
 
     document.body.appendChild(mirror);
 
@@ -69,78 +77,72 @@ async function initiateEdit(pElement) {
     const pText = $(pElement).text().trim();
 
     // ==========================================
-    // 保存原始聊天窗口滚动位置
+    // 注入用户提供的代码：保存原始聊天窗口滚动位置
     // ==========================================
     savedScrollPosition = $('#chat').scrollTop();
     isTripleClickEditing = true;
 
+    // 修复视觉闪烁：注入临时全局样式，彻底屏蔽 ST 强行将光标置底导致的 1 帧画面闪烁
+    const styleId = 'triple-click-hide-textarea';
+    if (!$('#' + styleId).length) {
+        $('<style id="' + styleId + '">#curEditTextarea { opacity: 0 !important; }</style>').appendTo('head');
+    }
+
     // 模拟点击自带的“编辑”按钮进入编辑模式
     $mes.find('.mes_edit').trigger('click');
 
-    // 使用 requestAnimationFrame 极速轮询等待 Textarea 渲染
-    return new Promise((resolve) => {
-        let attempts = 0;
-        const maxAttempts = 60; // 约 1 秒 (60 帧)，防止死循环
+    // 替换为 requestAnimationFrame 的极速轮询机制
+    let $textarea = null;
+    const maxAttempts = 60; // 防止卡死，最多等 60 帧（约1秒）
+    let attempts = 0;
 
-        function checkTextarea() {
-            const $textarea = $('#curEditTextarea');
-            
-            if ($textarea.length > 0) {
-                // 第一瞬间将透明度设为 0，阻断一切跳转与置底闪烁！
-                if ($textarea.css('opacity') !== '0') {
-                    $textarea.css('opacity', '0');
-                }
-
-                if ($textarea.val().length > 0) {
-                    const rawText = $textarea.val();
-                    let targetIndex = 0;
-
-                    // ====== 核心改进：生成忽略多行注释的安全搜索副本 ======
-                    // 将所有的 <!-- ... --> 以及可能写错的 <--! ... --> 替换为等长度的空格
-                    // 这样就能确保匹配出的 index 完全正确，且绝不会匹配进隐藏段落里
-                    const searchableText = rawText.replace(/<(?:!--|--!)[\s\S]*?-->/g, match => ' '.repeat(match.length));
-
-                    // 取段落里前 15 个非空字符作为搜索锚点（无视中英文分词规律）
-                    const chars = pText.replace(/\s+/g, '').substring(0, 15).split('');
-                    
-                    if (chars.length > 0) {
-                        // 构建宽容正则：每个字中间最多允许20个无关字符（包容 Markdown 星号、排版等干扰）
-                        const regexStr = chars.map(c => c.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('[\\s\\S]{0,20}?');
-                        const matchRegex = new RegExp(regexStr, 'i');
-
-                        // 在“屏蔽了注释”的安全文本中搜索，直击正文
-                        const match = searchableText.match(matchRegex);
-
-                        if (match) {
-                            targetIndex = match.index;
-                        } else {
-                            // 终极备用方案：寻找前10个字的纯文本死配
-                            targetIndex = searchableText.indexOf(pText.substring(0, 10));
-                            if (targetIndex === -1) targetIndex = 0; 
-                        }
-                    }
-
-                    // 执行精准滚动
-                    scrollToIndexInTextarea($textarea[0], targetIndex);
-                    
-                    // 计算和滚动完成，恢复编辑框的可见度
-                    $textarea.css('opacity', '1');
-                    return resolve();
-                }
-            }
-
-            attempts++;
-            if (attempts < maxAttempts) {
-                requestAnimationFrame(checkTextarea);
+    await new Promise((resolve) => {
+        function check() {
+            $textarea = $('#curEditTextarea');
+            if ($textarea.length > 0 && $textarea.val().length > 0) {
+                resolve();
+            } else if (attempts < maxAttempts) {
+                attempts++;
+                requestAnimationFrame(check);
             } else {
-                // 保底超时处理，恢复可见性
-                if ($textarea.length > 0) $textarea.css('opacity', '1');
                 resolve();
             }
         }
-
-        requestAnimationFrame(checkTextarea);
+        requestAnimationFrame(check);
     });
+
+    if (!$textarea || $textarea.length === 0) {
+        $('#' + styleId).remove(); // 失败也要移除屏蔽样式
+        return;
+    }
+
+    const rawText = $textarea.val();
+    let targetIndex = 0;
+
+    // 构建一个允许穿透 HTML 注释 (如 <!-- draft -->) 及 Markdown 符号的正则表达式
+    // 取该段落的前 10 个单词作为锚点
+    const words = pText.split(/\s+/).slice(0, 10).map(w => w.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'));
+    
+    if (words.length > 0) {
+        // [\s\S]*? 允许匹配两个单词之间的任意字符（如空格、星号、HTML标签、注释等）
+        const regexStr = words.join('[\\s\\S]*?');
+        const matchRegex = new RegExp(regexStr, 'i');
+        const match = rawText.match(matchRegex);
+
+        if (match) {
+            targetIndex = match.index;
+        } else {
+            // 如果极度复杂的结构导致正则失效，退回到基础的 index 匹配
+            targetIndex = rawText.indexOf(words.join(' '));
+            if (targetIndex === -1) targetIndex = 0; 
+        }
+    }
+
+    // 执行精准滚动
+    scrollToIndexInTextarea($textarea[0], targetIndex);
+
+    // 滚动计算完毕，移除屏蔽样式使编辑框瞬间可见
+    $('#' + styleId).remove();
 }
 
 // 插件入口初始化
@@ -157,9 +159,9 @@ jQuery(function() {
     });
 
     // ==========================================
-    // 监听SillyTavern更新消息事件以恢复位置
+    // 注入用户提供的代码：监听消息更新以恢复位置
     // ==========================================
-    // （点击Save、Cancel或者按Esc退出编辑都会触发）
+    // 8. 监听SillyTavern更新消息事件（点击Save、Cancel或者按Esc退出编辑都会触发）
     eventSource.on(event_types.MESSAGE_UPDATED, () => {
         if (isTripleClickEditing) {
             isTripleClickEditing = false;
