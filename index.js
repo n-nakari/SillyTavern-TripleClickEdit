@@ -48,12 +48,12 @@ function scrollToIndexInTextarea(textarea, index) {
 
     document.body.removeChild(mirror);
 
-    // 将编辑框的滚动条精确设定到计算出的高度
-    textarea.scrollTop = targetTop;
-
-    // 将光标设置在目标段落的开头，并聚焦
+    // 将光标设置在目标段落的开头，并聚焦（这会触发浏览器默认的滚动）
     textarea.setSelectionRange(index, index);
     textarea.focus();
+
+    // 覆盖浏览器默认行为，将编辑框的内部滚动条精确设定到计算出的高度
+    textarea.scrollTop = targetTop;
 }
 
 /**
@@ -77,25 +77,17 @@ async function initiateEdit(pElement) {
     // 模拟点击自带的“编辑”按钮进入编辑模式
     $mes.find('.mes_edit').trigger('click');
 
-    // 修复1: 轮询等待 Textarea 渲染并填充文本 (改为 requestAnimationFrame 极速轮询)
+    // 极速轮询等待 Textarea 渲染并填充文本 (最多等待 60 帧，约 1 秒)
     let $textarea = null;
-    await new Promise((resolve) => {
-        let attempts = 0;
-        function check() {
-            $textarea = $('#curEditTextarea');
-            if ($textarea.length > 0 && $textarea.val().length > 0) {
-                // 捕获到输入框的第一瞬间将其透明度设为 0，隐藏默认的置底跳转画面
-                $textarea.css('opacity', '0');
-                resolve();
-            } else if (attempts < 100) { // 最多等待 ~1.6 秒
-                attempts++;
-                requestAnimationFrame(check);
-            } else {
-                resolve();
-            }
+    for (let i = 0; i < 60; i++) { 
+        await new Promise(r => requestAnimationFrame(r));
+        $textarea = $('#curEditTextarea');
+        if ($textarea.length > 0 && $textarea.val().length > 0) {
+            // 在捕获到输入框的第一瞬间将其透明度设为 0，防止底部闪烁
+            $textarea.css('opacity', '0');
+            break;
         }
-        requestAnimationFrame(check);
-    });
+    }
 
     if (!$textarea || $textarea.length === 0) return;
 
@@ -121,25 +113,21 @@ async function initiateEdit(pElement) {
         }
     }
 
-    // 执行精准滚动 (此时编辑框仍是透明的，不会闪烁)
+    // 执行精准滚动（修改 textarea 内的 scrollTop）
     scrollToIndexInTextarea($textarea[0], targetIndex);
 
-    // 修复1补充: 计算和滚动完成后，恢复可见性
-    $textarea.css('opacity', '1');
-
-    // 修复2: 强制让该楼层编辑框顶部显示在 #chat 页面的顶部附近
-    const alignChatScroll = () => {
+    // 使用 requestAnimationFrame 等待浏览器的原生聚焦滚动处理完毕，然后强制纠正外部 #chat 的滚动
+    requestAnimationFrame(() => {
         const $chat = $('#chat');
-        if ($mes.length > 0) {
-            // 计算楼层元素相对顶部的位置，加 10px 作为视觉缓冲边距
-            const offsetTop = $mes.position().top + $chat.scrollTop();
-            $chat.scrollTop(offsetTop - 10);
-        }
-    };
-    
-    alignChatScroll();
-    // 使用 requestAnimationFrame 再确认一次，抵消 SillyTavern 原生自适应输入框高度逻辑带来的位置偏移
-    requestAnimationFrame(alignChatScroll);
+        const chatOffsetTop = $chat.offset().top;
+        const mesOffsetTop = $mes.offset().top;
+        
+        // 强制让 #chat 页面定位到该消息/编辑框的顶部显示，并预留 10px 边距防贴边
+        $chat.scrollTop($chat.scrollTop() + (mesOffsetTop - chatOffsetTop) - 10);
+        
+        // 计算并滚动到正确位置后，恢复可见
+        $textarea.css('opacity', '1');
+    });
 }
 
 // 插件入口初始化
