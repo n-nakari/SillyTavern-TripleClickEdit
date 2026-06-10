@@ -51,9 +51,9 @@ function scrollToIndexInTextarea(textarea, index) {
     // 将编辑框的滚动条精确设定到计算出的高度
     textarea.scrollTop = targetTop;
 
-    // 将光标设置在目标段落的开头，并聚焦 (使用 preventScroll 避免浏览器自作主张的滚动跳动)
-    textarea.focus({ preventScroll: true });
+    // 将光标设置在目标段落的开头，并聚焦
     textarea.setSelectionRange(index, index);
+    textarea.focus();
 }
 
 /**
@@ -75,39 +75,35 @@ async function initiateEdit(pElement) {
     isTripleClickEditing = true;
 
     // 模拟点击自带的“编辑”按钮进入编辑模式
-    // 如果由于 click_to_edit 等原因已经存在编辑框，就不重复触发
-    if ($mes.find('.edit_textarea').length === 0) {
-        $mes.find('.mes_edit').trigger('click');
-    }
+    $mes.find('.mes_edit').trigger('click');
 
-    // 使用 requestAnimationFrame 极速轮询等待 Textarea 渲染
+    // ==========================================
+    // 修复问题1：使用 requestAnimationFrame 极速轮询
+    // 在捕获到输入框的第一瞬间将其透明度设为 0
+    // ==========================================
     let $textarea = null;
-    let attempts = 0;
-    
-    await new Promise(resolve => {
-        const check = () => {
+    await new Promise((resolve) => {
+        let attempts = 0;
+        function checkElement() {
             $textarea = $('#curEditTextarea');
-            if ($textarea.length > 0) {
-                // 【核心修复1】发现编辑框的第一时间，将其设为完全透明，避免肉眼看到 ST 官方代码强制光标置底的画面
+            if ($textarea.length > 0 && $textarea.val().length > 0) {
+                // 瞬间捕获，隐藏编辑框以避免置底卡顿和闪烁
                 $textarea.css('opacity', '0');
-                // 等待 ST 将内容填充完毕
-                if ($textarea.val().length > 0) {
-                    resolve(true);
-                    return;
-                }
+                resolve();
+            } else if (attempts < 60) { // 大约1秒钟的超时安全退出
+                attempts++;
+                requestAnimationFrame(checkElement);
+            } else {
+                resolve();
             }
-            // 超时保护：约 1.5 秒 (90帧)
-            if (attempts > 90) {
-                resolve(false);
-                return;
-            }
-            attempts++;
-            requestAnimationFrame(check);
-        };
-        requestAnimationFrame(check);
+        }
+        requestAnimationFrame(checkElement);
     });
 
-    if (!$textarea || $textarea.length === 0) return;
+    if (!$textarea || $textarea.length === 0) {
+        isTripleClickEditing = false;
+        return;
+    }
 
     const rawText = $textarea.val();
     let targetIndex = 0;
@@ -131,12 +127,15 @@ async function initiateEdit(pElement) {
         }
     }
 
-    // 执行精准滚动
+    // 执行精准滚动与定位
     scrollToIndexInTextarea($textarea[0], targetIndex);
-    
-    // 【核心修复2】解除透明伪装，并立刻强势恢复 #chat 的滚动位置，抵消任何因焦点跳动带来的页面偏移
-    $textarea.css('opacity', '1');
+
+    // ==========================================
+    // 修复问题2：打断浏览器为了居中光标而强制执行的滚动
+    // 在一切计算并定位完毕后，立刻恢复#chat容器原本的位置，最后再恢复透明度可见
+    // ==========================================
     $('#chat').scrollTop(savedScrollPosition);
+    $textarea.css('opacity', '1');
 }
 
 // 插件入口初始化
@@ -146,17 +145,12 @@ jQuery(function() {
     $('#chat').on('click', '.mes_text p', function(e) {
         if (e.detail === 3) {
             e.preventDefault();
-            // 阻止事件冒泡，切断 ST 原生的单次点击编辑逻辑，防止二次触发冲突
-            e.stopPropagation(); 
-            // 确保没有选中多余的文本干扰视线
+            // 确保没有选中多余的文本干扰视线，同时打断可能触发原生ST逻辑的干扰
             window.getSelection().removeAllRanges(); 
             initiateEdit(this);
         }
     });
 
-    // ==========================================
-    // 监听更新消息事件以恢复位置
-    // ==========================================
     // 8. 监听SillyTavern更新消息事件（点击Save、Cancel或者按Esc退出编辑都会触发）
     eventSource.on(event_types.MESSAGE_UPDATED, () => {
         if (isTripleClickEditing) {
