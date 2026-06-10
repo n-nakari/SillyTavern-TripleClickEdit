@@ -1,0 +1,10 @@
+{
+    "display_name": "SillyTavern-TripleClickEdit",
+    "loading_order": 1,
+    "requires": [],
+    "optional": [],
+    "js": "index.js",
+    "author": "Nakari",
+    "version": "1.0.0",
+    "homePage": "https://github.com/n-nakari/SillyTavern-TripleClickEdit"
+}
