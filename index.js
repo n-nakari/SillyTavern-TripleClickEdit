@@ -77,26 +77,36 @@ async function initiateEdit(pElement) {
     // 模拟点击自带的“编辑”按钮进入编辑模式
     $mes.find('.mes_edit').trigger('click');
 
-    // 修复1: 使用 requestAnimationFrame 极速轮询，并在捕获瞬间将透明度设为0防闪烁
-    const $textarea = await new Promise((resolve) => {
-        let attempts = 0;
-        function check() {
-            const $ta = $('#curEditTextarea');
-            if ($ta.length > 0 && $ta.val().length > 0) {
-                // 捕获的第一瞬间立刻隐藏，防止闪烁和置底卡顿暴露给用户
-                $ta.css('opacity', '0');
-                resolve($ta);
-            } else if (attempts < 60) { // 避免死循环，最多轮询约1秒
-                attempts++;
-                requestAnimationFrame(check);
-            } else {
-                resolve(null);
+    // 使用 requestAnimationFrame 极速轮询等待 Textarea 渲染
+    let $textarea = null;
+    let attempts = 0;
+    
+    await new Promise((resolve) => {
+        function checkTextarea() {
+            $textarea = $('#curEditTextarea');
+            if ($textarea.length > 0) {
+                // 捕获到输入框的第一瞬间将其透明度设为 0，防止底部跳转闪烁
+                $textarea.css('opacity', '0');
+                
+                // 确保值已填充
+                if ($textarea.val().length > 0) {
+                    return resolve();
+                }
             }
+            
+            attempts++;
+            if (attempts > 60) { // 大约等待 1 秒 (60 帧)，防止死循环
+                return resolve();
+            }
+            requestAnimationFrame(checkTextarea);
         }
-        requestAnimationFrame(check);
+        requestAnimationFrame(checkTextarea);
     });
 
-    if (!$textarea || $textarea.length === 0) return;
+    if (!$textarea || $textarea.length === 0 || $textarea.val().length === 0) {
+        if ($textarea && $textarea.length > 0) $textarea.css('opacity', '1');
+        return;
+    }
 
     const rawText = $textarea.val();
     let targetIndex = 0;
@@ -120,22 +130,11 @@ async function initiateEdit(pElement) {
         }
     }
 
-    // 执行精准内部滚动
+    // 执行精准滚动
     scrollToIndexInTextarea($textarea[0], targetIndex);
 
-    // 修复2: 强制 #chat 页面定位到当前编辑框(mes_text)的顶部，然后恢复透明度可见
-    requestAnimationFrame(() => {
-        const $chatElem = $('#chat');
-        const $mesText = $mes.find('.mes_text');
-        if ($mesText.length > 0) {
-            // 计算编辑区域距离 #chat 顶部的绝对位置，并覆盖 ST 原生的滚动乱跳行为
-            const targetScrollTop = $mesText.offset().top - $chatElem.offset().top + $chatElem.scrollTop();
-            $chatElem.scrollTop(targetScrollTop);
-        }
-        
-        // 计算和跳转都完成后，瞬间恢复编辑框显示，实现无缝平滑进入
-        $textarea.css('opacity', '');
-    });
+    // 计算并滚动到正确位置后，恢复可见
+    $textarea.css('opacity', '1');
 }
 
 // 插件入口初始化
