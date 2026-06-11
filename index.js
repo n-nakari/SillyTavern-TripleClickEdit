@@ -69,7 +69,7 @@ async function initiateEdit(pElement) {
     const pText = $(pElement).text().trim();
 
     // ==========================================
-    // 保存原始聊天窗口滚动位置
+    // 注入用户提供的代码：保存原始聊天窗口滚动位置
     // ==========================================
     savedScrollPosition = $('#chat').scrollTop();
     isTripleClickEditing = true;
@@ -111,37 +111,64 @@ async function initiateEdit(pElement) {
     const rawText = $textarea.val();
     let targetIndex = 0;
 
-    // 提取段落中的有效文字字符（字母、数字、多语言汉字等），过滤掉容易被正则修改的标点符号和空格
-    // 取前 30 个字符作为特征锚点
-    const cleanChars = pText.replace(/[^\p{L}\p{N}]/gu, '').substring(0, 30).split('');
+    // ==========================================
+    // 核心修复：无视正则魔改的“骨架穿透”匹配算法
+    // ==========================================
+    
+    // 1. 过滤掉所有标点、引号、空格等，仅提取纯字母、数字和中日韩字符作为骨架
+    const cleanChars = pText.replace(/[^\p{L}\p{N}]/gu, '').split('');
     
     if (cleanChars.length > 0) {
-        // 使用 [\s\S]{0,250}? 拼接字符，允许字符之间存在最多 250 个干扰字符
-        // 这样可以完美穿透隐藏的 <!-- tags -->、被正则删掉的词汇、以及被转换的引号
-        const regexStr = cleanChars.map(c => c.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('[\\s\\S]{0,250}?');
-        try {
-            const matchRegex = new RegExp(regexStr, 'i');
-            const match = rawText.match(matchRegex);
+        // 2. 取前 15 个纯字符作为锚点（既有唯一性，计算也不会过慢）
+        const searchChars = cleanChars.slice(0, 15);
+        
+        // 3. 构建正则：允许任意两个骨架字符间插有 0-150 个任意字符。
+        // 这意味着不管你是删减了词语（八股正则）、转换了引号（引号正则）、还是中间卡了奇怪的标签，全都能穿透匹配
+        const regexStr = searchChars.map(c => c.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('[\\s\\S]{0,150}?');
+        const matchRegex = new RegExp(regexStr, 'i');
+        const match = rawText.match(matchRegex);
 
-            if (match) {
-                targetIndex = match.index;
-            } else {
-                targetIndex = rawText.indexOf(pText);
-                if (targetIndex === -1) targetIndex = 0; 
+        if (match) {
+            targetIndex = match.index;
+            
+            // 4. 向上追溯回卷：识别并涵盖附着在段落前面的长串隐藏标签
+            const textBefore = rawText.substring(0, targetIndex);
+            
+            // 如果我们匹配字符时不小心匹配到了 <!-- draft: [生成原稿] 阿遥... --> 的内部
+            // 退回到注释块开头
+            const lastOpenComment = textBefore.lastIndexOf('<!--');
+            const lastCloseComment = textBefore.lastIndexOf('-->');
+            if (lastOpenComment > lastCloseComment) {
+                targetIndex = lastOpenComment; 
             }
-        } catch (e) {
-            targetIndex = rawText.indexOf(pText);
-            if (targetIndex === -1) targetIndex = 0; 
+            
+            // 继续检查定位点前面是不是还紧挨着其他的标签簇 (找寻段间 \n\n )
+            const doubleNewline = rawText.lastIndexOf('\n\n', targetIndex);
+            if (doubleNewline !== -1) {
+                const gap = rawText.substring(doubleNewline + 2, targetIndex);
+                // 把尖括号标签和注释干掉之后，看看这块空白带里是不是没有别的内容了
+                const gapWithoutTags = gap.replace(/<[^>]+>/g, '').replace(/<!--[\s\S]*?-->/g, '').trim();
+                // 如果空隙里全都是隐藏标签（比如<DH_..>或<!--count..-->），直接退回到段间空白处
+                if (gapWithoutTags === '') {
+                    targetIndex = doubleNewline + 2;
+                }
+            }
+            
+        } else {
+            // 如果被魔改得连 15 个字符骨架都匹配不齐，降级到 5 个字符试试
+            const fallbackChars = cleanChars.slice(0, 5);
+            if (fallbackChars.length > 0) {
+                const fallbackRegexStr = fallbackChars.map(c => c.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('[\\s\\S]{0,150}?');
+                const fallbackMatch = rawText.match(new RegExp(fallbackRegexStr, 'i'));
+                if (fallbackMatch) targetIndex = fallbackMatch.index;
+            }
         }
-    } else {
-        targetIndex = rawText.indexOf(pText);
-        if (targetIndex === -1) targetIndex = 0; 
     }
 
     // 执行精准滚动
     scrollToIndexInTextarea($textarea[0], targetIndex);
 
-    // 计算并滚动到正确位置后，恢复可见
+    // 计算并滚动到正确位置后，恢复可见，丝滑无缝
     $textarea.css('opacity', '1');
 }
 
@@ -159,7 +186,7 @@ jQuery(function() {
     });
 
     // ==========================================
-    // 监听消息更新以恢复位置
+    // 注入用户提供的代码：监听消息更新以恢复位置
     // ==========================================
     // 8. 监听SillyTavern更新消息事件（点击Save、Cancel或者按Esc退出编辑都会触发）
     eventSource.on(event_types.MESSAGE_UPDATED, () => {
