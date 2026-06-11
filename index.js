@@ -25,7 +25,6 @@ function scrollToIndexInTextarea(textarea, index) {
         mirror.style[prop] = style[prop];
     });
 
-    // 设置镜像 Div 为隐藏且绝对定位
     mirror.style.position = 'absolute';
     mirror.style.visibility = 'hidden';
     mirror.style.overflow = 'hidden';
@@ -37,8 +36,11 @@ function scrollToIndexInTextarea(textarea, index) {
     // 截取从开头到目标索引的文本
     const textUpToIndex = textarea.value.substring(0, index);
 
+    // 【关键修复】必须转义 HTML，因为 Textarea 视标签为纯文本，镜像 Div 也必须按纯文本渲染，否则 <!-- draft --> 不占高度
+    const escapeHtml = (t) => t.replace(/[&<>"']/g, m => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#039;' })[m]);
+
     // 转换换行符并插入一个追踪位置的锚点 span
-    mirror.innerHTML = textUpToIndex.replace(/\n/g, '<br>') + '<span id="caret-marker">|</span>';
+    mirror.innerHTML = escapeHtml(textUpToIndex).replace(/\n/g, '<br>') + '<span id="caret-marker">|</span>';
 
     document.body.appendChild(mirror);
 
@@ -54,6 +56,89 @@ function scrollToIndexInTextarea(textarea, index) {
     // 将光标设置在目标段落的开头，并聚焦
     textarea.setSelectionRange(index, index);
     textarea.focus();
+}
+
+/**
+ * 智能模糊匹配算法：在原始文本中寻找对应的段落索引
+ * 忽略 HTML 注释、标签，且无视标点符号和正则造成的增删改查
+ */
+function findBestMatchIndex(rawText, pText) {
+    // 1. 将 HTML 注释和标签遮罩为空格，保持长度不变，从而避免匹配到草稿 (draft) 等隐藏内容
+    let masked = rawText.replace(/<!--[\s\S]*?-->/g, match => ' '.repeat(match.length));
+    masked = masked.replace(/<[^>]+>/g, match => ' '.repeat(match.length));
+
+    // 2. 提取所有的核心字符（字母、数字、中日韩文字），过滤掉标点符号和空格
+    const coreRegex = /[\p{L}\p{N}]/u;
+    const rawMap = [];
+    for (let i = 0; i < masked.length; i++) {
+        if (coreRegex.test(masked[i])) {
+            rawMap.push({ char: masked[i], index: i });
+        }
+    }
+
+    let pChars = "";
+    for (let i = 0; i < pText.length; i++) {
+        if (coreRegex.test(pText[i])) {
+            pChars += pText[i];
+        }
+    }
+
+    if (pChars.length === 0) return 0;
+
+    // 取前 40 个核心字符作为特征搜索目标
+    const N = Math.min(pChars.length, 40);
+    const searchTarget = pChars.substring(0, N);
+
+    let bestMatchRawIndex = -1;
+    let maxMatches = -1;
+    let minSpan = Infinity;
+
+    // 3. 滑动窗口寻找最佳匹配
+    for (let i = 0; i < rawMap.length; i++) {
+        // 如果当前字符在搜索目标的前几位中没有出现，直接跳过以加速
+        // (放宽到 15 位是为了兼容某些给段落强行注入前缀的极端正则)
+        let startIdx = searchTarget.indexOf(rawMap[i].char);
+        if (startIdx === -1 || startIdx > 15) continue;
+
+        let pIdx = startIdx;
+        let matches = 0;
+        let rawIdx = i;
+        
+        // 贪心匹配，允许 rawText 或 pText 存在最高 30 个字的正则增删误差
+        while (pIdx < N && rawIdx < rawMap.length && (rawIdx - i) < N + 30) {
+            if (rawMap[rawIdx].char === searchTarget[pIdx]) {
+                matches++;
+                pIdx++;
+                rawIdx++;
+            } else {
+                let nextRawMatches = (rawIdx + 1 < rawMap.length && rawMap[rawIdx+1].char === searchTarget[pIdx]);
+                let nextPMatches = (pIdx + 1 < N && rawMap[rawIdx].char === searchTarget[pIdx+1]);
+                
+                if (nextRawMatches && !nextPMatches) {
+                    rawIdx++; // 原始文本多了字 (被正则删了)
+                } else if (nextPMatches && !nextRawMatches) {
+                    pIdx++;   // 页面文本多了字 (被正则加了)
+                } else {
+                    rawIdx++;
+                    pIdx++;
+                }
+            }
+        }
+        
+        // 记录最佳匹配点
+        if (matches > maxMatches || (matches === maxMatches && (rawIdx - i) < minSpan)) {
+            maxMatches = matches;
+            minSpan = rawIdx - i;
+            bestMatchRawIndex = rawMap[i].index;
+        }
+    }
+
+    // 如果匹配率低于 30%，说明没找到，兜底返回 0 (顶部)
+    if (maxMatches < N * 0.3) {
+        return 0;
+    }
+
+    return bestMatchRawIndex;
 }
 
 /**
@@ -108,46 +193,18 @@ async function initiateEdit(pElement) {
         return;
     }
 
-    const rawText = $textarea.val();
-    let targetIndex = 0;
-
-    // ==========================================
-    // 核心算法：骨架提取 + 占位涂白 + 弹性正则
-    // ==========================================
-    
-    // 1. 占位涂白：将 <!-- --> 注释替换为同等数量的空格。
-    // 这保证了底层 draft 不会造成重复匹配，同时由于字符数量没变，算出来的 Index 依然完美对应原文位置。
-    let safeRawText = rawText.replace(/<!--[\s\S]*?-->/g, match => ' '.repeat(match.length));
-
-    // 2. 骨架提取：剔除 DOM 文本中所有的标点符号、空格，只保留纯汉字、字母和数字。
-    // 这样彻底免疫了“引号替换”、“逗号变句号”等标点正则带来的干扰。
-    const coreChars = pText.replace(/[^\u4e00-\u9fa5a-zA-Z0-9]/g, '').split('');
-
-    if (coreChars.length > 0) {
-        // 取前 20 个核心骨架字符作为定位锚点
-        const anchorChars = coreChars.slice(0, 20);
+    try {
+        const rawText = $textarea.val();
         
-        // 3. 弹性正则：在骨架字符之间允许出现 0~200 个任意字符（包括换行）
-        // 这意味着无论你的正则删掉了多长的“八股词汇”，或是隐藏了多长的 <DH_> 标签，都能被这 200 个宽容度吸收跨越。
-        const regexStr = anchorChars.join('[\\s\\S]{0,200}?');
-        const matchRegex = new RegExp(regexStr, 'i');
+        // 调用智能模糊搜索
+        const targetIndex = findBestMatchIndex(rawText, pText);
         
-        const match = safeRawText.match(matchRegex);
-
-        if (match) {
-            targetIndex = match.index;
-        } else {
-            // 极限情况下的降级处理：尝试直接找前十个原文字符
-            targetIndex = rawText.indexOf(pText.substring(0, 10));
-            if (targetIndex === -1) targetIndex = 0; 
-        }
+        // 执行精准滚动
+        scrollToIndexInTextarea($textarea[0], targetIndex);
+    } finally {
+        // 计算并滚动到正确位置后，无论是否成功，恢复可见
+        $textarea.css('opacity', '1');
     }
-
-    // 执行精准滚动
-    scrollToIndexInTextarea($textarea[0], targetIndex);
-
-    // 计算并滚动到正确位置后，恢复可见，实现零闪烁
-    $textarea.css('opacity', '1');
 }
 
 // 插件入口初始化
