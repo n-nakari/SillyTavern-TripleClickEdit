@@ -111,65 +111,38 @@ async function initiateEdit(pElement) {
     const rawText = $textarea.val();
     let targetIndex = 0;
 
-    // -----------------------------------------------------------
-    // 全新修复：模糊字符序列对齐算法，忽略被隐藏的标签和被正则修改的内容
-    // -----------------------------------------------------------
+    // ==========================================
+    // 全新高容错定位算法：免疫标点替换与正则删词
+    // ==========================================
     
-    // 1. 将 rawText 中的隐藏标签和注释替换为空格，保持原本的字符索引位置不变
-    // 这样可以彻底无视 <!-- draft --> 和 <xxx> 标签，防止错误定位到它们内部
-    let searchableText = rawText.replace(/<!--[\s\S]*?-->/g, match => ' '.repeat(match.length));
-    searchableText = searchableText.replace(/<[^>]*>/g, match => ' '.repeat(match.length));
-
-    // 2. 提取所点击段落里的前 20 个纯字符（仅字母、数字、中日韩文字），过滤掉标点和引号等容易被正则替换的符号
-    const pureChars = pText.match(/[\p{L}\p{N}]/gu) || [];
+    // 1. 提取点击段落的前 15 个“纯文字/数字”（完全过滤标点、符号、空格）
+    // 这样就彻底无视了引号被替换为「」等标点变更的干扰
+    const cleanChars = pText.replace(/[^\p{L}\p{N}]/gu, '').split('').slice(0, 15);
     
-    if (pureChars.length > 0) {
-        const anchorChars = pureChars.slice(0, 20);
-        let bestIndex = 0;
-        let maxMatched = -1;
+    if (cleanChars.length > 0) {
+        // 2. 将这 15 个字用间隔正则缝合。[\s\S]{0,500}? 表示两个字之间允许存在最多500个任意字符（包括换行、隐藏标签、被删减的词等）
+        const regexStr = cleanChars.join('[\\s\\S]{0,500}?');
+        const matchRegex = new RegExp(regexStr, 'iu'); 
+        const match = rawText.match(matchRegex);
 
-        // 3. 在 searchableText 中扫描，寻找和 anchorChars 匹配度最高的字符序列
-        for (let i = 0; i < searchableText.length; i++) {
-            // 匹配起始字必须一致
-            if (searchableText[i] !== anchorChars[0]) continue;
-
-            let matchCount = 1;
-            let ptr = i + 1;
+        if (match) {
+            targetIndex = match.index;
             
-            // 顺序匹配后续锚点字
-            for (let j = 1; j < anchorChars.length; j++) {
-                let foundIndex = -1;
-                // 向下寻找匹配字符，容错跨度设为 150 字符，容忍此期间被正则删去或替换的短语
-                let limit = Math.min(ptr + 150, searchableText.length); 
-                for (let k = ptr; k < limit; k++) {
-                    if (searchableText[k] === anchorChars[j]) {
-                        foundIndex = k;
-                        break;
-                    }
-                }
-                
-                // 如果在容忍范围内找到了，匹配度加一，并将扫描指针移到该字之后
-                if (foundIndex !== -1) {
-                    matchCount++;
-                    ptr = foundIndex + 1;
-                }
+            // 3. 向上回溯：如果正文第一个字的上方紧挨着 <!-- draft --> 等隐藏标签，将定位点上移包含标签
+            const textBefore = rawText.substring(0, targetIndex);
+            // 匹配紧跟在段落前的任意 HTML 标签、注释及空白符
+            const leadingTagsRegex = /(?:<[^>]+>|<!--[\s\S]*?-->|\s)+$/i;
+            const tagMatch = textBefore.match(leadingTagsRegex);
+            
+            if (tagMatch) {
+                targetIndex -= tagMatch[0].length;
             }
-
-            // 记录最高匹配分数的索引作为最终位置
-            if (matchCount > maxMatched) {
-                maxMatched = matchCount;
-                bestIndex = i;
-                
-                // 若达到了 100% 满分匹配，这就是最完美的答案，立刻中断扫描节省性能
-                if (matchCount === anchorChars.length) {
-                    break;
-                }
-            }
+        } else {
+            // 极度异常的情况退回到基础匹配
+            targetIndex = rawText.indexOf(pText.substring(0, 5));
+            if (targetIndex === -1) targetIndex = 0; 
         }
-        targetIndex = bestIndex;
     }
-
-    // -----------------------------------------------------------
 
     // 执行精准滚动
     scrollToIndexInTextarea($textarea[0], targetIndex);
@@ -208,4 +181,5 @@ jQuery(function() {
             });
         }
     });
+
 });
