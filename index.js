@@ -110,64 +110,66 @@ async function initiateEdit(pElement) {
 
     const rawText = $textarea.val();
     let targetIndex = 0;
-    let found = false;
 
-    // 构建一个允许穿透标点符号、正则删除词、以及内部隐藏标签的模糊匹配逻辑
-    // 提取纯文字（字母、数字、中日韩汉字），去除所有可能被正则修改的标点符号和空格
-    const cleanChars = pText.replace(/[^\p{L}\p{N}]/gu, '').split('');
+    // -----------------------------------------------------------
+    // 全新修复：模糊字符序列对齐算法，忽略被隐藏的标签和被正则修改的内容
+    // -----------------------------------------------------------
     
-    if (cleanChars.length > 0) {
-        // 取前 15 个字符作为锚点，数量既能保证唯一性，又不会导致正则过长
-        const anchorChars = cleanChars.slice(0, 15);
-        
-        // 构建正则：允许字符之间有最多 100 个字符的干扰（例如被删除的八股词、标签等）
-        const regexStr = anchorChars.join('[\\s\\S]{0,100}?');
-        const matchRegex = new RegExp(regexStr, 'gi');
-        let match;
+    // 1. 将 rawText 中的隐藏标签和注释替换为空格，保持原本的字符索引位置不变
+    // 这样可以彻底无视 <!-- draft --> 和 <xxx> 标签，防止错误定位到它们内部
+    let searchableText = rawText.replace(/<!--[\s\S]*?-->/g, match => ' '.repeat(match.length));
+    searchableText = searchableText.replace(/<[^>]*>/g, match => ' '.repeat(match.length));
 
-        while ((match = matchRegex.exec(rawText)) !== null) {
-            // 检查该匹配是否在 HTML 注释 (如 <!-- draft -->) 内
-            const lastCommentStart = rawText.lastIndexOf('<!--', match.index);
-            const lastCommentEnd = rawText.lastIndexOf('-->', match.index);
+    // 2. 提取所点击段落里的前 20 个纯字符（仅字母、数字、中日韩文字），过滤掉标点和引号等容易被正则替换的符号
+    const pureChars = pText.match(/[\p{L}\p{N}]/gu) || [];
+    
+    if (pureChars.length > 0) {
+        const anchorChars = pureChars.slice(0, 20);
+        let bestIndex = 0;
+        let maxMatched = -1;
+
+        // 3. 在 searchableText 中扫描，寻找和 anchorChars 匹配度最高的字符序列
+        for (let i = 0; i < searchableText.length; i++) {
+            // 匹配起始字必须一致
+            if (searchableText[i] !== anchorChars[0]) continue;
+
+            let matchCount = 1;
+            let ptr = i + 1;
             
-            // 如果 <!-- 的位置小于等于 --> 的位置，或者都没找到，说明不在注释内
-            if (lastCommentStart <= lastCommentEnd) {
-                targetIndex = match.index;
-                found = true;
-                break;
+            // 顺序匹配后续锚点字
+            for (let j = 1; j < anchorChars.length; j++) {
+                let foundIndex = -1;
+                // 向下寻找匹配字符，容错跨度设为 150 字符，容忍此期间被正则删去或替换的短语
+                let limit = Math.min(ptr + 150, searchableText.length); 
+                for (let k = ptr; k < limit; k++) {
+                    if (searchableText[k] === anchorChars[j]) {
+                        foundIndex = k;
+                        break;
+                    }
+                }
+                
+                // 如果在容忍范围内找到了，匹配度加一，并将扫描指针移到该字之后
+                if (foundIndex !== -1) {
+                    matchCount++;
+                    ptr = foundIndex + 1;
+                }
             }
-        }
-    }
 
-    if (!found) {
-        // 降级策略：如果上述匹配失败，尝试用传统单词方法（针对可能包含全英文/特殊符号但不符合 \p{L} 的情况）
-        const fallbackWords = pText.split(/\s+/).slice(0, 10).map(w => w.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'));
-        if (fallbackWords.length > 0) {
-            const fallbackRegex = new RegExp(fallbackWords.join('[\\s\\S]*?'), 'gi');
-            let fallbackMatch;
-            while ((fallbackMatch = fallbackRegex.exec(rawText)) !== null) {
-                const lastCommentStart = rawText.lastIndexOf('<!--', fallbackMatch.index);
-                const lastCommentEnd = rawText.lastIndexOf('-->', fallbackMatch.index);
-                if (lastCommentStart <= lastCommentEnd) {
-                    targetIndex = fallbackMatch.index;
-                    found = true;
+            // 记录最高匹配分数的索引作为最终位置
+            if (matchCount > maxMatched) {
+                maxMatched = matchCount;
+                bestIndex = i;
+                
+                // 若达到了 100% 满分匹配，这就是最完美的答案，立刻中断扫描节省性能
+                if (matchCount === anchorChars.length) {
                     break;
                 }
             }
         }
+        targetIndex = bestIndex;
     }
 
-    if (!found) {
-        // 最基础的兜底
-        targetIndex = rawText.indexOf(pText);
-        if (targetIndex === -1) targetIndex = 0;
-    }
-
-    // 优化定位：回退到该文字所在行的行首，以确保原本的引号、前置的同行标签也能完整显示
-    if (targetIndex > 0) {
-        const lastNewline = rawText.lastIndexOf('\n', targetIndex);
-        targetIndex = lastNewline !== -1 ? lastNewline + 1 : 0;
-    }
+    // -----------------------------------------------------------
 
     // 执行精准滚动
     scrollToIndexInTextarea($textarea[0], targetIndex);
