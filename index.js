@@ -153,9 +153,7 @@ async function initiateEdit(pElement) {
     // 提取点击段落的纯文本
     const pText = $(pElement).text().trim();
 
-    // ==========================================
-    // 注入用户提供的代码：保存原始聊天窗口滚动位置
-    // ==========================================
+    // 保存原始聊天窗口滚动位置
     savedScrollPosition = $('#chat').scrollTop();
     isTripleClickEditing = true;
 
@@ -220,10 +218,7 @@ jQuery(function() {
         }
     });
 
-    // ==========================================
-    // 注入用户提供的代码：监听消息更新以恢复位置
-    // ==========================================
-    // 8. 监听SillyTavern更新消息事件（点击Save、Cancel或者按Esc退出编辑都会触发）
+    // 监听SillyTavern更新消息事件（点击Save、Cancel或者按Esc退出编辑都会触发）
     eventSource.on(event_types.MESSAGE_UPDATED, () => {
         if (isTripleClickEditing) {
             isTripleClickEditing = false;
