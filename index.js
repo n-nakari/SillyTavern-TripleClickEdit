@@ -110,65 +110,69 @@ async function initiateEdit(pElement) {
 
     const rawText = $textarea.val();
     let targetIndex = 0;
+    let found = false;
 
-    // ==========================================
-    // 核心修复：无视正则魔改的“骨架穿透”匹配算法
-    // ==========================================
-    
-    // 1. 过滤掉所有标点、引号、空格等，仅提取纯字母、数字和中日韩字符作为骨架
+    // 构建一个允许穿透标点符号、正则删除词、以及内部隐藏标签的模糊匹配逻辑
+    // 提取纯文字（字母、数字、中日韩汉字），去除所有可能被正则修改的标点符号和空格
     const cleanChars = pText.replace(/[^\p{L}\p{N}]/gu, '').split('');
     
     if (cleanChars.length > 0) {
-        // 2. 取前 15 个纯字符作为锚点（既有唯一性，计算也不会过慢）
-        const searchChars = cleanChars.slice(0, 15);
+        // 取前 15 个字符作为锚点，数量既能保证唯一性，又不会导致正则过长
+        const anchorChars = cleanChars.slice(0, 15);
         
-        // 3. 构建正则：允许任意两个骨架字符间插有 0-150 个任意字符。
-        // 这意味着不管你是删减了词语（八股正则）、转换了引号（引号正则）、还是中间卡了奇怪的标签，全都能穿透匹配
-        const regexStr = searchChars.map(c => c.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('[\\s\\S]{0,150}?');
-        const matchRegex = new RegExp(regexStr, 'i');
-        const match = rawText.match(matchRegex);
+        // 构建正则：允许字符之间有最多 100 个字符的干扰（例如被删除的八股词、标签等）
+        const regexStr = anchorChars.join('[\\s\\S]{0,100}?');
+        const matchRegex = new RegExp(regexStr, 'gi');
+        let match;
 
-        if (match) {
-            targetIndex = match.index;
+        while ((match = matchRegex.exec(rawText)) !== null) {
+            // 检查该匹配是否在 HTML 注释 (如 <!-- draft -->) 内
+            const lastCommentStart = rawText.lastIndexOf('<!--', match.index);
+            const lastCommentEnd = rawText.lastIndexOf('-->', match.index);
             
-            // 4. 向上追溯回卷：识别并涵盖附着在段落前面的长串隐藏标签
-            const textBefore = rawText.substring(0, targetIndex);
-            
-            // 如果我们匹配字符时不小心匹配到了 <!-- draft: [生成原稿] 阿遥... --> 的内部
-            // 退回到注释块开头
-            const lastOpenComment = textBefore.lastIndexOf('<!--');
-            const lastCloseComment = textBefore.lastIndexOf('-->');
-            if (lastOpenComment > lastCloseComment) {
-                targetIndex = lastOpenComment; 
-            }
-            
-            // 继续检查定位点前面是不是还紧挨着其他的标签簇 (找寻段间 \n\n )
-            const doubleNewline = rawText.lastIndexOf('\n\n', targetIndex);
-            if (doubleNewline !== -1) {
-                const gap = rawText.substring(doubleNewline + 2, targetIndex);
-                // 把尖括号标签和注释干掉之后，看看这块空白带里是不是没有别的内容了
-                const gapWithoutTags = gap.replace(/<[^>]+>/g, '').replace(/<!--[\s\S]*?-->/g, '').trim();
-                // 如果空隙里全都是隐藏标签（比如<DH_..>或<!--count..-->），直接退回到段间空白处
-                if (gapWithoutTags === '') {
-                    targetIndex = doubleNewline + 2;
-                }
-            }
-            
-        } else {
-            // 如果被魔改得连 15 个字符骨架都匹配不齐，降级到 5 个字符试试
-            const fallbackChars = cleanChars.slice(0, 5);
-            if (fallbackChars.length > 0) {
-                const fallbackRegexStr = fallbackChars.map(c => c.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('[\\s\\S]{0,150}?');
-                const fallbackMatch = rawText.match(new RegExp(fallbackRegexStr, 'i'));
-                if (fallbackMatch) targetIndex = fallbackMatch.index;
+            // 如果 <!-- 的位置小于等于 --> 的位置，或者都没找到，说明不在注释内
+            if (lastCommentStart <= lastCommentEnd) {
+                targetIndex = match.index;
+                found = true;
+                break;
             }
         }
+    }
+
+    if (!found) {
+        // 降级策略：如果上述匹配失败，尝试用传统单词方法（针对可能包含全英文/特殊符号但不符合 \p{L} 的情况）
+        const fallbackWords = pText.split(/\s+/).slice(0, 10).map(w => w.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'));
+        if (fallbackWords.length > 0) {
+            const fallbackRegex = new RegExp(fallbackWords.join('[\\s\\S]*?'), 'gi');
+            let fallbackMatch;
+            while ((fallbackMatch = fallbackRegex.exec(rawText)) !== null) {
+                const lastCommentStart = rawText.lastIndexOf('<!--', fallbackMatch.index);
+                const lastCommentEnd = rawText.lastIndexOf('-->', fallbackMatch.index);
+                if (lastCommentStart <= lastCommentEnd) {
+                    targetIndex = fallbackMatch.index;
+                    found = true;
+                    break;
+                }
+            }
+        }
+    }
+
+    if (!found) {
+        // 最基础的兜底
+        targetIndex = rawText.indexOf(pText);
+        if (targetIndex === -1) targetIndex = 0;
+    }
+
+    // 优化定位：回退到该文字所在行的行首，以确保原本的引号、前置的同行标签也能完整显示
+    if (targetIndex > 0) {
+        const lastNewline = rawText.lastIndexOf('\n', targetIndex);
+        targetIndex = lastNewline !== -1 ? lastNewline + 1 : 0;
     }
 
     // 执行精准滚动
     scrollToIndexInTextarea($textarea[0], targetIndex);
 
-    // 计算并滚动到正确位置后，恢复可见，丝滑无缝
+    // 计算并滚动到正确位置后，恢复可见
     $textarea.css('opacity', '1');
 }
 
