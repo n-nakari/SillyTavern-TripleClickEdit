@@ -69,7 +69,7 @@ async function initiateEdit(pElement) {
     const pText = $(pElement).text().trim();
 
     // ==========================================
-    // 注入用户提供的代码：保存原始聊天窗口滚动位置
+    // 保存原始聊天窗口滚动位置
     // ==========================================
     savedScrollPosition = $('#chat').scrollTop();
     isTripleClickEditing = true;
@@ -111,23 +111,31 @@ async function initiateEdit(pElement) {
     const rawText = $textarea.val();
     let targetIndex = 0;
 
-    // 构建一个允许穿透 HTML 注释 (如 <!-- draft -->) 及 Markdown 符号的正则表达式
-    // 取该段落的前 10 个单词作为锚点
-    const words = pText.split(/\s+/).slice(0, 10).map(w => w.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'));
+    // 提取段落中的有效文字字符（字母、数字、多语言汉字等），过滤掉容易被正则修改的标点符号和空格
+    // 取前 30 个字符作为特征锚点
+    const cleanChars = pText.replace(/[^\p{L}\p{N}]/gu, '').substring(0, 30).split('');
     
-    if (words.length > 0) {
-        // [\s\S]*? 允许匹配两个单词之间的任意字符（如空格、星号、HTML标签、注释等）
-        const regexStr = words.join('[\\s\\S]*?');
-        const matchRegex = new RegExp(regexStr, 'i');
-        const match = rawText.match(matchRegex);
+    if (cleanChars.length > 0) {
+        // 使用 [\s\S]{0,250}? 拼接字符，允许字符之间存在最多 250 个干扰字符
+        // 这样可以完美穿透隐藏的 <!-- tags -->、被正则删掉的词汇、以及被转换的引号
+        const regexStr = cleanChars.map(c => c.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('[\\s\\S]{0,250}?');
+        try {
+            const matchRegex = new RegExp(regexStr, 'i');
+            const match = rawText.match(matchRegex);
 
-        if (match) {
-            targetIndex = match.index;
-        } else {
-            // 如果极度复杂的结构导致正则失效，退回到基础的 index 匹配
-            targetIndex = rawText.indexOf(words.join(' '));
+            if (match) {
+                targetIndex = match.index;
+            } else {
+                targetIndex = rawText.indexOf(pText);
+                if (targetIndex === -1) targetIndex = 0; 
+            }
+        } catch (e) {
+            targetIndex = rawText.indexOf(pText);
             if (targetIndex === -1) targetIndex = 0; 
         }
+    } else {
+        targetIndex = rawText.indexOf(pText);
+        if (targetIndex === -1) targetIndex = 0; 
     }
 
     // 执行精准滚动
@@ -151,7 +159,7 @@ jQuery(function() {
     });
 
     // ==========================================
-    // 注入用户提供的代码：监听消息更新以恢复位置
+    // 监听消息更新以恢复位置
     // ==========================================
     // 8. 监听SillyTavern更新消息事件（点击Save、Cancel或者按Esc退出编辑都会触发）
     eventSource.on(event_types.MESSAGE_UPDATED, () => {
