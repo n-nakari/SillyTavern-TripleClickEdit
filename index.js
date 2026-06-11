@@ -112,35 +112,39 @@ async function initiateEdit(pElement) {
     let targetIndex = 0;
 
     // ==========================================
-    // 全新高容错定位算法：免疫标点替换与正则删词
+    // 全新精准文本映射算法：应对正则删改、标签隐藏及 Draft 重复
     // ==========================================
     
-    // 1. 提取点击段落的前 15 个“纯文字/数字”（完全过滤标点、符号、空格）
-    // 这样就彻底无视了引号被替换为「」等标点变更的干扰
-    const cleanChars = pText.replace(/[^\p{L}\p{N}]/gu, '').split('').slice(0, 15);
-    
-    if (cleanChars.length > 0) {
-        // 2. 将这 15 个字用间隔正则缝合。[\s\S]{0,500}? 表示两个字之间允许存在最多500个任意字符（包括换行、隐藏标签、被删减的词等）
-        const regexStr = cleanChars.join('[\\s\\S]{0,500}?');
-        const matchRegex = new RegExp(regexStr, 'iu'); 
-        const match = rawText.match(matchRegex);
+    // 1. 将 <!-- --> 替换为等长空格。这不仅保护了 Index 索引位置不变，还能彻底防止匹配到隐藏的原稿(draft)中
+    const sanitizedRawText = rawText.replace(/<!--[\s\S]*?-->/g, match => ' '.repeat(match.length));
+
+    // 2. 提取段落中的特征字符（去除了所有的标点符号、空格、各种类型的引号），最多取 20 个字
+    const pureChars = pText.replace(/[^\p{L}\p{N}]/gu, '');
+    const anchorChars = pureChars.slice(0, 20).split('');
+
+    if (anchorChars.length > 0) {
+        // 允许每个可见字之间有最多 400 个字符的干扰间隙（足够跨过被正则删掉的长标签和大量废话词汇）
+        const regexStr = anchorChars.join('[\\s\\S]{0,400}?');
+        const matchRegex = new RegExp(regexStr, 'i');
+        
+        // 3. 计算前面所有兄弟元素的渲染文本总长度，作为锚点估算我们在全文中的位置
+        const precedingTextLength = $(pElement).prevAll().text().length;
+        // 留出 1500 字符的巨大容错空间，防止上文因为正则产生大范围文本缩减而导致索引偏移
+        const searchStartIndex = Math.max(0, precedingTextLength - 1500);
+
+        // 4. 从安全位置开始正则搜索
+        const match = sanitizedRawText.substring(searchStartIndex).match(matchRegex);
 
         if (match) {
-            targetIndex = match.index;
-            
-            // 3. 向上回溯：如果正文第一个字的上方紧挨着 <!-- draft --> 等隐藏标签，将定位点上移包含标签
-            const textBefore = rawText.substring(0, targetIndex);
-            // 匹配紧跟在段落前的任意 HTML 标签、注释及空白符
-            const leadingTagsRegex = /(?:<[^>]+>|<!--[\s\S]*?-->|\s)+$/i;
-            const tagMatch = textBefore.match(leadingTagsRegex);
-            
-            if (tagMatch) {
-                targetIndex -= tagMatch[0].length;
-            }
+            targetIndex = searchStartIndex + match.index;
         } else {
-            // 极度异常的情况退回到基础匹配
-            targetIndex = rawText.indexOf(pText.substring(0, 5));
-            if (targetIndex === -1) targetIndex = 0; 
+            // 如果带起始位置没搜到（极其罕见的极端全文本大修），退回到从头全局搜索
+            const globalMatch = sanitizedRawText.match(matchRegex);
+            if (globalMatch) {
+                targetIndex = globalMatch.index;
+            } else {
+                targetIndex = 0; 
+            }
         }
     }
 
